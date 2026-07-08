@@ -1,3 +1,4 @@
+import { v4 as uuidv4 } from 'uuid'
 import { DEFAULT_SETTINGS } from './types.js'
 
 let poolInstance = null
@@ -32,10 +33,16 @@ export class CFPoolManager {
   markFailed(tokenId, statusCode) {
     const token = this.tokens.get(tokenId)
     if (!token) return
-    if (statusCode === 401) { token.status = 'banned'; this.tokens.delete(tokenId) }
-    else if (statusCode === 429) {
-      token.status = 'cooldown'; token.lastChecked = Date.now()
-      setTimeout(() => { const t = this.tokens.get(tokenId); if (t) t.status = 'active' }, this.settings.cooldownMin * 60000)
+    if (statusCode === 401) {
+      // FIX: jangan delete — biarkan tercatat sebagai banned di status getter
+      token.status = 'banned'
+    } else if (statusCode === 429) {
+      token.status = 'cooldown'
+      token.lastChecked = Date.now()
+      setTimeout(() => {
+        const t = this.tokens.get(tokenId)
+        if (t) t.status = 'active'
+      }, this.settings.cooldownMin * 60000)
     }
     if (this.activeCount < this.settings.minActive) this.triggerReplenish()
   }
@@ -45,21 +52,34 @@ export class CFPoolManager {
     this.generating = true
     try {
       const res = await fetch(`${this.afcUrl}/api/generate`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ count }),
       })
       if (!res.ok) throw new Error(`Auto-FreeCF ${res.status}`)
       const results = await res.json()
       for (const r of results) {
-        if (r.valid) this.tokens.set(r.token, {
-          id: crypto.randomUUID(), email: r.email, accountId: r.account_id,
-          token: r.token, status: 'active', addedAt: Date.now(),
-          lastChecked: Date.now(), lastUsed: 0, requestCount: 0,
-        })
+        if (r.valid) {
+          const id = uuidv4()
+          this.tokens.set(id, {
+            id,
+            email: r.email,
+            accountId: r.account_id,
+            token: r.token,
+            status: 'active',
+            addedAt: Date.now(),
+            lastChecked: Date.now(),
+            lastUsed: 0,
+            requestCount: 0,
+          })
+        }
       }
       return { generated: results.length, results }
-    } catch (err) { return { error: err instanceof Error ? err.message : 'Unknown' } }
-    finally { this.generating = false }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Unknown' }
+    } finally {
+      this.generating = false
+    }
   }
 
   async triggerReplenish() {
@@ -75,8 +95,12 @@ export class CFPoolManager {
       try {
         const res = await fetch('https://api.cloudflare.com/client/v4/user/tokens/verify',
           { headers: { Authorization: `Bearer ${token.token}` } })
-        if (!res.ok) this.tokens.delete(token.id)
-        else token.lastChecked = now
+        if (!res.ok) {
+          // Token invalid — mark as banned, jangan delete
+          token.status = 'banned'
+        } else {
+          token.lastChecked = now
+        }
       } catch {}
     }
     if (this.activeCount < this.settings.minActive) this.triggerReplenish()
@@ -84,16 +108,23 @@ export class CFPoolManager {
 
   startHealthCheckLoop() {
     if (this.healthCheckTimer) clearInterval(this.healthCheckTimer)
-    this.healthCheckTimer = setInterval(() => this.runHealthCheck(), this.settings.healthCheckIntervalMin * 60000)
+    this.healthCheckTimer = setInterval(
+      () => this.runHealthCheck(),
+      this.settings.healthCheckIntervalMin * 60000
+    )
   }
 
-  get activeCount() { return [...this.tokens.values()].filter(t => t.status === 'active').length }
+  get activeCount() {
+    return [...this.tokens.values()].filter(t => t.status === 'active').length
+  }
+
   get status() {
     return {
       active: this.activeCount,
       cooldown: [...this.tokens.values()].filter(t => t.status === 'cooldown').length,
       banned: [...this.tokens.values()].filter(t => t.status === 'banned').length,
-      total: this.tokens.size, tokens: [...this.tokens.values()],
+      total: this.tokens.size,
+      tokens: [...this.tokens.values()],
     }
   }
 }
